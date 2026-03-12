@@ -363,13 +363,24 @@ async function analyseForArticles(){
   const safeName=file.name.replace(/'/g,"\\'");
   pyodide.FS.writeFile('/tmp/_scan_'+file.name,new Uint8Array(buf));
   const result=await pyodide.runPythonAsync(`
-import json
+import json, re
 from docx import Document
 doc=Document('/tmp/_scan_${file.name.replace(/'/g,"\\'")}')
 h1s=[]
+def is_label_h1(t):
+    t = t.strip()
+    low = t.lower()
+    # Short text ending with colon = label (e.g. "Pillar Topic 1 :")
+    if t.endswith(':') and len(t.split()) <= 5: return True
+    # Matches patterns like "Pillar Topic 1", "Topic 2 :", "Part 1", "Section A"
+    if re.match(r'^(pillar|topic|section|article|part|blog|post)\\s*(topic\\s*)?[\\d]+\\s*:?\\s*$', low): return True
+    # Contains placeholder words with nothing else meaningful
+    if low in ['pillar topic 1 :', 'pillar topic 2 :', 'pillar topic 3 :', 'pillar topic 4 :']: return True
+    return False
 for p in doc.paragraphs:
     if p.style and "Heading 1" in p.style.name and p.text.strip():
-        h1s.append(p.text.strip())
+        if not is_label_h1(p.text.strip()):
+            h1s.append(p.text.strip())
 json.dumps(h1s)
 `);
   const h1s=JSON.parse(result);
@@ -638,16 +649,25 @@ def read_docx(path):
         imgs.append({"has_alt":bool(alt.strip())})
     return " ".join(parts),h,imgs,links,mt,md
 
+def is_h1_label(t):
+    t=t.strip();low=t.lower()
+    if t.endswith(':') and len(t.split())<=5: return True
+    if re.match(r'^(pillar|topic|section|article|part|blog|post)\s*(topic\s*)?[\d]+\s*:?\s*$',low): return True
+    if re.match(r'^pillar\s+topic\s+\d+\s*:?\s*$',low): return True
+    return False
 def split_h1(path):
     doc=Document(path);arts=[];cur={"h1":"","paras":[],"imgs":[],"links":[]}
     for para in doc.paragraphs:
         st=para.style.name if para.style else "";t=para.text.strip()
         if not t: continue
         if "Heading 1" in st:
+            if is_h1_label(t): continue
             if cur["h1"] or cur["paras"]: arts.append(dict(cur))
             cur={"h1":t,"paras":[t],"imgs":[],"links":[]}
         else: cur["paras"].append(t)
     if cur["h1"] or cur["paras"]: arts.append(cur)
+    # Discard ghost preamble blocks that have no H1 (e.g. doc title before first article)
+    arts=[a for a in arts if a["h1"]]
     for rel in doc.part.rels.values():
         if "hyperlink" in rel.reltype:
             for a in arts: a["links"].append(rel.target_ref)
@@ -733,8 +753,12 @@ def mk_excel(audits,out):
             cell=ws.cell(r,j,v)
             if j==7: sc3(cell,fill=sfill(v),font=Font(name="Arial",bold=True,size=9),align="center")
             else: sc3(cell,fill=fill,font=Font(name="Arial",size=9),align="center" if j in[4,5,6] else "left",wrap=True)
+    def safe_sheet(title):
+        import re as _re
+        s=_re.sub(r'[\\/:*?\[\]]','',str(title))[:28].strip() or "Article"
+        return s
     for a in audits:
-        ws2=wb.create_sheet(a["article_title"][:28].replace("/","-"))
+        ws2=wb.create_sheet(safe_sheet(a["article_title"]))
         ws2.column_dimensions['A'].width=30;ws2.column_dimensions['B'].width=55
         r=1
         tc2=ws2.cell(r,1,f"Audit: {a['article_title']}");ws2.merge_cells(f"A{r}:B{r}")
